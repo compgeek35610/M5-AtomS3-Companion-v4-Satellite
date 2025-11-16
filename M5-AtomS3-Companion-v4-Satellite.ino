@@ -59,17 +59,13 @@ const unsigned long pingIntervalMs = 2000;
 int brightness = 100;
 
 // External RGB LED (Jaycar RGB LED) --------------------------
-#define LEDC_CHANNEL_RED   0
-#define LEDC_CHANNEL_GREEN 1
-#define LEDC_CHANNEL_BLUE  2
-
 const int LED_PIN_RED   = G8;
 const int LED_PIN_GREEN = G5;
 const int LED_PIN_BLUE  = G6;
 const int LED_PIN_GND   = G7;
 
-const int pwmFreq       = 5000;
-const int pwmResolution = 8;
+const uint32_t pwmFreq       = 5000;
+const uint8_t  pwmResolution = 8;
 
 uint8_t lastColorR = 0;
 uint8_t lastColorG = 0;
@@ -100,20 +96,37 @@ void saveParamCallback() {
 }
 
 // ------------------------------------------------------------
-// External LED Handling
+// External LED Handling (new LEDC API: ledcAttach / ledcWrite)
 // ------------------------------------------------------------
 void setExternalLedColor(uint8_t r, uint8_t g, uint8_t b) {
   lastColorR = r;
   lastColorG = g;
   lastColorB = b;
 
+  // For *common cathode* (LED GND to G7):
   uint8_t scaledR = r * max(brightness, 15) / 100;
   uint8_t scaledG = g * max(brightness, 15) / 100;
   uint8_t scaledB = b * max(brightness, 15) / 100;
 
-  ledcWrite(LEDC_CHANNEL_RED,   scaledR);
-  ledcWrite(LEDC_CHANNEL_GREEN, scaledG);
-  ledcWrite(LEDC_CHANNEL_BLUE,  scaledB);
+  // For *common anode* (LED VCC to +3V3), uncomment below:
+  // scaledR = 255 - scaledR;
+  // scaledG = 255 - scaledG;
+  // scaledB = 255 - scaledB;
+
+  // DEBUG: log raw + scaled values
+  Serial.print("[LED] setExternalLedColor raw r/g/b = ");
+  Serial.print(r); Serial.print("/");
+  Serial.print(g); Serial.print("/");
+  Serial.print(b);
+  Serial.print("  scaled = ");
+  Serial.print(scaledR); Serial.print("/");
+  Serial.print(scaledG); Serial.print("/");
+  Serial.println(scaledB);
+
+  // New-style LEDC: duty is keyed by PIN
+  ledcWrite(LED_PIN_RED,   scaledR);
+  ledcWrite(LED_PIN_GREEN, scaledG);
+  ledcWrite(LED_PIN_BLUE,  scaledB);
 }
 
 // ------------------------------------------------------------
@@ -145,7 +158,7 @@ void drawCenterText(const String& txt, uint16_t color = WHITE, uint16_t bg = BLA
   int totalHeight = lineHeight * lines.size();
   int topY = (M5.Display.height() - totalHeight) / 2 + (lineHeight / 2);
 
-  for (int i = 0; i < lines.size(); i++) {
+  for (int i = 0; i < (int)lines.size(); i++) {
     int y = topY + i * lineHeight;
     M5.Display.drawString(lines[i], M5.Display.width() / 2, y);
   }
@@ -172,9 +185,13 @@ void sendAddDevice() {
   String cmd = "ADD-DEVICE DEVICEID=" + deviceID +
                " PRODUCT_NAME=\"M5 AtomS3\" KEYS_TOTAL=1 KEYS_PER_ROW=1 BITMAPS=72 COLORS=rgb TEXT=true";
   client.println(cmd);
+  Serial.println("[API] Sent: " + cmd);
 }
 
 void handleKeyState(const String& line) {
+  // DEBUG: log the whole KEY-STATE line
+  Serial.println("[API] KEY-STATE line: " + line);
+
   // -------- COLOR=rgba(...): LED only --------
   int colorPos = line.indexOf("COLOR=");
   if (colorPos >= 0) {
@@ -183,6 +200,9 @@ void handleKeyState(const String& line) {
     if (end < 0) end = line.length();
     String c = line.substring(start, end);
     c.trim();
+
+    // DEBUG: raw COLOR field
+    Serial.println("[API] COLOR raw: " + c);
 
     if (c.startsWith("\"") && c.endsWith("\"")) c = c.substring(1, c.length() - 1);
 
@@ -196,8 +216,20 @@ void handleKeyState(const String& line) {
       int r = c.substring(0, p1).toInt();
       int g = c.substring(p1+1, p2).toInt();
       int b = c.substring(p2+1, p3).toInt();
+
+      // DEBUG: parsed rgba components (alpha ignored)
+      Serial.print("[API] Parsed COLOR r/g/b = ");
+      Serial.print(r); Serial.print("/");
+      Serial.print(g); Serial.print("/");
+      Serial.println(b);
+
       setExternalLedColor(r, g, b);
+    } else {
+      Serial.println("[API] COLOR is not rgba(), ignoring for LED.");
     }
+  } else {
+    // No COLOR in this KEY-STATE
+    Serial.println("[API] No COLOR= field in KEY-STATE.");
   }
 
   // -------- BITMAP --------
@@ -213,7 +245,12 @@ void handleKeyState(const String& line) {
       bmp = bmp.substring(1, bmp.length() - 1);
 
     int inLen = bmp.length();
-    if (inLen <= 0) return;
+    if (inLen <= 0) {
+      Serial.println("[API] BITMAP present but empty.");
+      return;
+    }
+
+    Serial.println("[API] BITMAP base64 length: " + String(inLen));
 
     size_t out_max = (inLen * 3) / 4 + 4;
     std::unique_ptr<uint8_t[]> buf(new uint8_t[out_max]);
@@ -221,17 +258,24 @@ void handleKeyState(const String& line) {
 
     int res = mbedtls_base64_decode(buf.get(), out_max, &out_len,
                                     (const unsigned char*)bmp.c_str(), inLen);
-    if (res != 0) return;
+    if (res != 0) {
+      Serial.println("[API] Base64 decode failed, res=" + String(res) + " out_len=" + String(out_len));
+      return;
+    }
+
+    Serial.println("[API] Decoded BITMAP bytes: " + String(out_len));
 
     int sizeRGB  = sqrt(out_len / 3);
     int sizeRGBA = sqrt(out_len / 4);
 
-    bool isRGB = (sizeRGB * sizeRGB * 3 == (int)out_len);
+    bool isRGB  = (sizeRGB  * sizeRGB  * 3 == (int)out_len);
     bool isRGBA = (sizeRGBA * sizeRGBA * 4 == (int)out_len);
 
     if (isRGB) {
+      Serial.println("[API] BITMAP detected as RGB, size=" + String(sizeRGB));
       drawBitmapRGB888FullScreen(buf.get(), sizeRGB);
     } else if (isRGBA) {
+      Serial.println("[API] BITMAP detected as RGBA, size=" + String(sizeRGBA));
       int pixels = sizeRGBA * sizeRGBA;
       std::unique_ptr<uint8_t[]> rgb(new uint8_t[pixels * 3]);
       uint8_t* s = buf.get();
@@ -244,6 +288,8 @@ void handleKeyState(const String& line) {
         d += 3;
       }
       drawBitmapRGB888FullScreen(rgb.get(), sizeRGBA);
+    } else {
+      Serial.println("[API] BITMAP size mismatch, cannot infer square dimensions.");
     }
   }
 }
@@ -251,6 +297,9 @@ void handleKeyState(const String& line) {
 void parseAPI(const String& apiData) {
   if (apiData.length() == 0) return;
   if (apiData.startsWith("PONG")) return;
+
+  // DEBUG: log all incoming API lines except very frequent PONG
+  Serial.println("[API] RX: " + apiData);
 
   if (apiData.startsWith("PING")) {
     String payload = apiData.substring(apiData.indexOf(' ') + 1);
@@ -262,11 +311,13 @@ void parseAPI(const String& apiData) {
     int valPos = apiData.indexOf("VALUE=");
     String v = apiData.substring(valPos + 6);
     brightness = v.toInt();
+    Serial.println("[API] BRIGHTNESS set to " + String(brightness));
     setExternalLedColor(lastColorR, lastColorG, lastColorB);
     return;
   }
 
   if (apiData.startsWith("KEYS-CLEAR")) {
+    Serial.println("[API] KEYS-CLEAR received");
     clearScreen(BLACK);
     setExternalLedColor(0,0,0);
     return;
@@ -302,8 +353,10 @@ void connectToNetwork() {
   bool res = wifiManager.autoConnect(deviceID.c_str(), AP_password);
 
   if (!res) {
+    Serial.println("[WiFi] Failed to connect, showing WiFi ERR");
     drawCenterText("WiFi ERR", RED, BLACK);
   } else {
+    Serial.println("[WiFi] Connected to AP, IP=" + WiFi.localIP().toString());
     drawCenterText("WiFi OK", GREEN, BLACK);
     delay(500);
   }
@@ -314,6 +367,7 @@ void connectToNetwork() {
 // ------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
+  Serial.println("\n[M5AtomS3] Booting...");
 
   // Build deviceID from MAC every boot (do NOT store it)
   WiFi.mode(WIFI_STA);   // ensure MAC is initialised
@@ -331,6 +385,8 @@ void setup() {
   deviceID += macBuf;
   deviceID.toUpperCase();
 
+  Serial.println("[ID] deviceID = " + deviceID);
+
   // Store this ID
   preferences.begin("companion", false);
   preferences.putString("deviceid", deviceID);
@@ -342,6 +398,11 @@ void setup() {
     preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
 
   preferences.end();
+
+  Serial.print("[Prefs] Companion IP: ");
+  Serial.println(companion_host);
+  Serial.print("[Prefs] Companion Port: ");
+  Serial.println(companion_port);
 
   auto cfg = M5.config();
   M5.begin(cfg);
@@ -362,10 +423,35 @@ void setup() {
   pinMode(LED_PIN_GND, OUTPUT);
   digitalWrite(LED_PIN_GND, LOW);
 
-  ledcAttachChannel(LED_PIN_RED,   pwmFreq, pwmResolution, LEDC_CHANNEL_RED);
-  ledcAttachChannel(LED_PIN_GREEN, pwmFreq, pwmResolution, LEDC_CHANNEL_GREEN);
-  ledcAttachChannel(LED_PIN_BLUE,  pwmFreq, pwmResolution, LEDC_CHANNEL_BLUE);
+  Serial.println("[LED] Initialising PWM pins with ledcAttach...");
+  if (ledcAttach(LED_PIN_RED,   pwmFreq, pwmResolution)) {
+    Serial.println("[LED] PWM attached to RED pin");
+  } else {
+    Serial.println("[LED] ERROR attaching PWM to RED pin");
+  }
+  if (ledcAttach(LED_PIN_GREEN, pwmFreq, pwmResolution)) {
+    Serial.println("[LED] PWM attached to GREEN pin");
+  } else {
+    Serial.println("[LED] ERROR attaching PWM to GREEN pin");
+  }
+  if (ledcAttach(LED_PIN_BLUE,  pwmFreq, pwmResolution)) {
+    Serial.println("[LED] PWM attached to BLUE pin");
+  } else {
+    Serial.println("[LED] ERROR attaching PWM to BLUE pin");
+  }
+
   setExternalLedColor(0,0,0);
+
+  // --- LED TEST: flash R, G, B in sequence ---
+  Serial.println("[LED] Running power-on colour test (R/G/B)...");
+  setExternalLedColor(255, 0, 0);  // Red
+  delay(300);
+  setExternalLedColor(0, 255, 0);  // Green
+  delay(300);
+  setExternalLedColor(0, 0, 255);  // Blue
+  delay(300);
+  setExternalLedColor(0, 0, 0);    // Off
+  // ------------------------------------------
 
   WiFi.setHostname(deviceID.c_str());
 
@@ -383,6 +469,7 @@ void setup() {
     String(companion_host) + "\n" + String(companion_port);
 
   drawCenterText(waitMsg, WHITE, BLACK);
+  Serial.println("[System] Setup complete, entering main loop.");
 }
 
 // ------------------------------------------------------------
@@ -396,6 +483,7 @@ void loop() {
 
       // Force a KEY RELEASE in Companion so it never stays “held”
       if (client.connected()) {
+          Serial.println("[BTN] Long press, sending KEY RELEASE before config portal");
           client.println("KEY-PRESS DEVICEID=" + deviceID + " KEY=0 PRESSED=false");
       }
 
@@ -417,15 +505,22 @@ void loop() {
       ESP.restart();
   }
 
-
   unsigned long now = millis();
   if (!client.connected() && (now - lastConnectTry >= connectRetryMs)) {
     lastConnectTry = now;
+    Serial.print("[NET] Connecting to Companion ");
+    Serial.print(companion_host);
+    Serial.print(":");
+    Serial.println(companion_port);
+
     if (client.connect(companion_host, atoi(companion_port))) {
+      Serial.println("[NET] Connected to Companion API");
       drawCenterText("Connected", GREEN, BLACK);
       delay(200);
       sendAddDevice();
       lastPingTime = millis();
+    } else {
+      Serial.println("[NET] Companion connect failed");
     }
   }
 
@@ -436,11 +531,15 @@ void loop() {
       if (line.length() > 0) parseAPI(line);
     }
 
-    if (M5.BtnA.wasPressed())
+    if (M5.BtnA.wasPressed()) {
+      Serial.println("[BTN] Short press -> KEY=0 PRESSED=true");
       client.println("KEY-PRESS DEVICEID=" + deviceID + " KEY=0 PRESSED=true");
+    }
 
-    if (M5.BtnA.wasReleased())
+    if (M5.BtnA.wasReleased()) {
+      Serial.println("[BTN] Release -> KEY=0 PRESSED=false");
       client.println("KEY-PRESS DEVICEID=" + deviceID + " KEY=0 PRESSED=false");
+    }
 
     if (now - lastPingTime >= pingIntervalMs) {
       client.println("PING atoms3");
