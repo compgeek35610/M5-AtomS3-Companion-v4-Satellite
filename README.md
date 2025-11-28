@@ -1,54 +1,82 @@
-# M5-AtomS3-Companion-v4-Satellite
-A compact, single-button satellite surface built for Companion v4 using the M5 AtomS3. Features external RGB back LED, full-screen upscaled bitmap support, WiFi config portal, OTA updates, and automatic MAC-based device ID; perfect for enhancing events with on-stage triggers, info like countdown timers and tally.
+M5-AtomS3-Companion-v4-Satellite
 
-## Features
-- Uses the M5 AtomS3 (ESP32-S3 / 0.85″ 128×128 screen)
-- Full-screen bitmap rendering (Companion sends 72×72 which is up-scaled)  
-- External RGB LED on G8/G5/G6 with G7 ground – mirrors key colour  
-- WiFiManager config portal (hold the button for 5 s)  
-- OTA firmware updates via ArduinoOTA  
-- Auto-generated deviceID “AtomS3_XXXXXX” from full MAC, matching other surfaces  
-- Companion API: KEY-STATE, BITMAP, COLOR, BRIGHTNESS, PING/keep-alive  
-- Stable code-base ready for release on GitHub & M5Burner  
+A compact, single-button satellite surface built for Companion v4 using the M5 AtomS3.
+Includes external RGB rear LED, full-screen upscaled bitmap mode, a new ultra-fast text mode, WiFi config portal, OTA updates, and auto MAC-based deviceID.
+Perfect for enhancing productions with on-stage triggers, tally, timers, cues, and status text.
 
-## Hardware Connections
-| Pin        | Function           |
-|------------|--------------------|
-| G8         | External LED – Red |
-| G5         | External LED – Green |
-| G6         | External LED – Blue |
-| G7         | External LED – Ground |
+Features
+- Two display modes:
+  • Bitmap Mode — Renders Companion’s 72×72 bitmaps upscaled to 128×128
+  • Text Mode (v1.3) — Fast, low-latency, no bitmap fetches
+    - 1–2 chars → Extra-big font
+    - 3 chars → Ultra-large font
+    - 4–6 chars → Large centered font
+    - >6 chars → Auto-wrap multi-line
+    - Supports COLOR= and TEXTCOLOR=
+- External RGB LED output on G8/G5/G6 (G7 = Ground), mirrors key colour
+- WiFiManager config portal (hold button for 5 seconds)
+- OTA updates via ArduinoOTA
+- Auto deviceID: AtomS3_XXXXXX (full MAC)
+- Supports Companion v4 Satellite API: TEXT, BITMAP, COLOR, TEXTCOLOR, BRIGHTNESS, KEY-STATE, PING
+- Clean, stable, production-ready codebase
+- M5Burner-ready binaries available
 
-Ensure the LED is common-cathode with G7 as Ground.
+Hardware Connections
+G8 – LED Red
+G5 – LED Green
+G6 – LED Blue
+G7 – LED Ground
+Use a common-cathode RGB LED (G7 = Ground)
 
-# Recomended LED
+Recommended LED
 AU: https://www.jaycar.com.au/tricolour-rgb-5mm-led-600-1000mcd-round-diffused/
 USA: https://www.adafruit.com/product/302
 
+Installation & Usage
+1. Clone this repository.
+2. Open CompanionSatelliteSingleButton.ino in Arduino IDE.
+3. Select M5AtomS3 via ESP32 board manager.
+4. Install libraries: M5Unified, WiFiManager, Preferences.
+5. Flash to the AtomS3.
+6. On boot, device shows BOOTING then “Waiting for Companion”.
+7. In Companion v4: Surfaces → Add Device → deviceID appears automatically.
+8. Hold front button for 5 seconds to open WiFi config portal (SSID = deviceID).
+9. Configure Companion IP/Port and choose bitmap or text mode.
+10. Press button to send KEY-PRESS to Companion. LED mirrors key color.
 
-## Installation & Usage
-1. Clone this repository.  
-2. Open `CompanionSatelliteSingleButton.ino` in Arduino IDE (ESP32 board selected).  
-3. Install dependencies: M5Unified, WiFiManager, Preferences.  
-4. Update `companion_host` and `companion_port` constants or use the config portal.  
-5. Upload firmware to AtomS3.  
-6. On first boot the device will show a “BOOTING…” screen, then wait for Companion.  
-7. In Companion v4: go to **Surfaces → Add Device**, use the sent deviceID.  
-8. Hold the button for 5 seconds to open the WiFi config portal (SSID will be the deviceID).  
-9. Press the button to trigger your Companion key press event. LED will mirror colour.
+OTA Firmware Update
+- OTA enabled by default.
+- Hostname = deviceID
+- Password = companion-satellite
+- Update from Arduino IDE using Network Ports.
 
-## Firmware Update (OTA)
-- On board: The code listens for ArduinoOTA service.  
-- Use same hostname (deviceID) during firmware upload.
+Troubleshooting
+Only one letter shows in text mode:
+- Update to v1.3 which fixes base64 decoding issues.
 
-## Troubleshooting
-- **Blank screen or crash**: Ensure BITMAPS=72 in `sendAddDevice()` — higher sizes may exceed RAM.  
-- **DeviceID shows “000…”**: Ensure you haven’t stored a different deviceID in Preferences; the firmware uses full MAC.  
-- **LED colour incorrect**: Check wiring and whether your LED is common-cathode.  
-- **Not connecting to Companion**: Ensure `companion_host` & `companion_port` are set correctly and device and PC are on same network.
+LED colours wrong:
+- Confirm LED is common-cathode (G7 = Ground).
+- Re-check wiring if colors appear swapped.
 
-## Version
-v1.2.0
+Not connecting to Companion:
+- Check IP and Port in WiFi config portal.
+- Ensure device and Companion are on same network.
+- Check firewall rules.
 
-## License
-MIT License — see [LICENSE](LICENSE) file for details.
+Blank screen or crashes:
+- Ensure sendAddDevice() uses BITMAPS=72 (required by bitmap mode).
+
+Version History
+v1.3
+- Text-only mode with zero bitmap requests
+- Faster UI, reduced latency
+- Fixed multi-letter text decoding
+- Improved color handling
+- Performance improvements
+
+v1.2
+- General stability and UI tweaks
+- Improved LED behaviour
+
+v1.1
+- Fixed PWM LED output
