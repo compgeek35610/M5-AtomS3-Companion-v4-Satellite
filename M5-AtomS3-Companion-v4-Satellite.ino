@@ -920,17 +920,19 @@ void connectToNetwork() {
     snprintf(modeBuf, sizeof(modeBuf), "bitmap");
   }
 
+  // Build default rotation string based on current screenRotation (0..3)
+  char rotBuf[5];
+  int rotDeg = 0;
+  if      (screenRotation == 1) rotDeg = 90;
+  else if (screenRotation == 2) rotDeg = 180;
+  else if (screenRotation == 3) rotDeg = 270;
+  else                          rotDeg = 0;
+  snprintf(rotBuf, sizeof(rotBuf), "%d", rotDeg);
+    
   custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", companion_host, 40);
   custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", companion_port, 6);
   custom_displayMode   = new WiFiManagerParameter("displayMode", "Display Mode (bitmap/text)", modeBuf, 8);
-
-  // Rotation parameter (degrees: 0/90/180/270) for TEXT mode
-  custom_rotation = new WiFiManagerParameter(
-    "rotation",
-    "Text Rotation (0/90/180/270)",
-    "0",    // default
-    4       // max length
-  );
+  custom_rotation      = new WiFiManagerParameter("rotation", "Text Rotation (0/90/180/270)", rotBuf, 4);
 
   wifiManager.addParameter(custom_companionIP);
   wifiManager.addParameter(custom_companionPort);
