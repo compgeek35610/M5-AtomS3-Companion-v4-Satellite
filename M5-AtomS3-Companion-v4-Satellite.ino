@@ -17,6 +17,7 @@
             - Large (4–6 chars)      : big font, centered
             - Normal (>6 chars)      : multi-line, centered (auto-wrap or manual "\n")
         * Uses COLOR/TEXTCOLOR for background/text in TEXT mode
+        * Text Rotate (0/90/180/270 in WiFiManager, TEXT mode only)
     - External RGB LED PWM output (G5 RED / G6 GREEN / G8 BLUE + G7 GND)
     - WiFiManager config portal (hold BtnA for 5s)
     - OTA firmware updates
@@ -94,6 +95,8 @@ int displayMode = DISPLAY_BITMAP; // default
 WiFiManagerParameter* custom_companionIP;
 WiFiManagerParameter* custom_companionPort;
 WiFiManagerParameter* custom_displayMode;
+WiFiManagerParameter* custom_rotation = nullptr;   // NEW: rotation parameter
+int screenRotation = 0;  // 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270° (TEXT mode only)
 
 // Forward declarations for text mode / brightness
 void setText(const String& txt);
@@ -119,11 +122,13 @@ void saveParamCallback() {
   String str_companionIP   = getParam("companionIP");
   String str_companionPort = getParam("companionPort");
   String str_displayMode   = getParam("displayMode");
+  String str_rotation      = getParam("rotation");   // NEW: rotation (0/90/180/270)
 
   preferences.begin("companion", false);
-  if (str_companionIP.length() > 0)   preferences.putString("companionip", str_companionIP);
-  if (str_companionPort.length() > 0) preferences.putString("companionport", str_companionPort);
-  if (str_displayMode.length() > 0)   preferences.putString("displayMode", str_displayMode);
+  if (str_companionIP.length() > 0)    preferences.putString("companionip",   str_companionIP);
+  if (str_companionPort.length() > 0)  preferences.putString("companionport", str_companionPort);
+  if (str_displayMode.length() > 0)    preferences.putString("displayMode",   str_displayMode);
+  if (str_rotation.length() > 0)       preferences.putString("rotation",      str_rotation); // NEW
   preferences.end();
 }
 
@@ -887,9 +892,20 @@ void connectToNetwork() {
   custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", companion_port, 6);
   custom_displayMode   = new WiFiManagerParameter("displayMode", "Display Mode (bitmap/text)", modeBuf, 8);
 
+  // --------------------------------------------------------
+  // NEW: Rotation parameter (degrees: 0/90/180/270) for TEXT mode
+  // --------------------------------------------------------
+  custom_rotation = new WiFiManagerParameter(
+    "rotation",
+    "Text Rotation (0/90/180/270)",
+    "0",    // default
+    4       // max length
+  );
+
   wifiManager.addParameter(custom_companionIP);
   wifiManager.addParameter(custom_companionPort);
   wifiManager.addParameter(custom_displayMode);
+  wifiManager.addParameter(custom_rotation);   // NEW
   wifiManager.setSaveParamsCallback(saveParamCallback);
 
   std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
@@ -917,16 +933,43 @@ void connectToNetwork() {
     preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
 
   String modeStr = preferences.getString("displayMode", custom_displayMode->getValue());
+  String rotStr  = preferences.getString("rotation",   custom_rotation->getValue()); // NEW
   preferences.end();
 
+  // Display mode (bitmap / text)
   if (modeStr.equalsIgnoreCase("text")) {
     displayMode = DISPLAY_TEXT;
   } else {
     displayMode = DISPLAY_BITMAP;
   }
 
+  // ------------------------------------------------------------
+  // NEW: Map rotation degrees -> M5 rotation index (0..3)
+  //   0°   -> 0
+  //   90°  -> 1
+  //   180° -> 2
+  //   270° -> 3
+  // Anything else defaults to 0°
+  // ------------------------------------------------------------
+  int rotDeg = rotStr.toInt();
+  if      (rotDeg == 90)  screenRotation = 1;
+  else if (rotDeg == 180) screenRotation = 2;
+  else if (rotDeg == 270) screenRotation = 3;
+  else                    screenRotation = 0;
+
+  // Only apply rotation in TEXT mode; BITMAP stays at 0
+  if (displayMode == DISPLAY_TEXT) {
+    M5.Display.setRotation(screenRotation);
+  } else {
+    M5.Display.setRotation(0);
+  }
+
   Serial.print("[Config] Display mode set to: ");
   Serial.println(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP");
+  Serial.print("[Config] Text rotation degrees: ");
+  Serial.println(rotDeg);
+  Serial.print("[Config] Text rotation index: ");
+  Serial.println(screenRotation);
 }
 
 // ------------------------------------------------------------
@@ -964,11 +1007,20 @@ void setup() {
     preferences.getString("companionport").toCharArray(companion_port, sizeof(companion_port));
 
   String modeStr = preferences.getString("displayMode", "bitmap");
+  String rotStr  = preferences.getString("rotation",   "0");   // NEW: default rotation 0°
+
   if (modeStr.equalsIgnoreCase("text")) {
     displayMode = DISPLAY_TEXT;
   } else {
     displayMode = DISPLAY_BITMAP;
   }
+
+  // Map saved degrees -> rotation index (0..3)
+  int rotDeg = rotStr.toInt();
+  if      (rotDeg == 90)  screenRotation = 1;
+  else if (rotDeg == 180) screenRotation = 2;
+  else if (rotDeg == 270) screenRotation = 3;
+  else                    screenRotation = 0;
 
   preferences.end();
 
@@ -978,11 +1030,25 @@ void setup() {
   Serial.println(companion_port);
   Serial.print("[Prefs] Display Mode: ");
   Serial.println(displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP");
+  Serial.print("[Prefs] Text rotation degrees: ");
+  Serial.println(rotDeg);
+  Serial.print("[Prefs] Text rotation index: ");
+  Serial.println(screenRotation);
 
   auto cfg = M5.config();
   M5.begin(cfg);
 
-  M5.Display.setRotation(0);
+  // --------------------------------------------------------
+  // Apply initial rotation:
+  //   - TEXT mode   -> use screenRotation
+  //   - BITMAP mode -> fixed at 0 (no rotation)
+  // --------------------------------------------------------
+  if (displayMode == DISPLAY_TEXT) {
+    M5.Display.setRotation(screenRotation);
+  } else {
+    M5.Display.setRotation(0);
+  }
+
   M5.Display.setFont(&fonts::Font0);
   M5.Display.setTextSize(1);
   applyDisplayBrightness();
