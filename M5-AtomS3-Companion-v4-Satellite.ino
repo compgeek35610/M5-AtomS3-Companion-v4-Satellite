@@ -38,6 +38,8 @@
 #include <vector>
 #include <math.h>
 #include <esp32-hal-ledc.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 
 // ------------------------------------------------------------
 // Globals / Config
@@ -46,6 +48,9 @@
 Preferences preferences;
 WiFiManager wifiManager;
 WiFiClient  client;
+
+// REST API Server for Companion configuration
+WebServer restServer(9999);
 
 // Companion server
 char companion_host[40] = "Companion IP";
@@ -58,6 +63,19 @@ IPAddress stationMask = IPAddress(255, 255, 255, 0);
 
 // Device ID – full MAC will be appended
 String deviceID = "";
+
+// WiFi hostname for mDNS
+String wifiHostname = "";
+
+// Boot counter for config portal trigger
+const uint8_t BOOT_FAIL_LIMIT = 1;
+int bootCountCached = 0;
+
+// Config portal status flag
+bool configPortalActive = false;
+
+// Flag to show config portal message immediately after display initialization
+bool showConfigPortalMessage = false;
 
 // AP password for config portal (empty = open)
 const char* AP_password = "";
@@ -134,6 +152,77 @@ void saveParamCallback() {
   if (str_displayMode.length() > 0)    preferences.putString("displayMode",   str_displayMode);
   if (str_rotation.length() > 0)       preferences.putString("rotation",      str_rotation);
   preferences.end();
+}
+
+// ------------------------------------------------------------
+// Boot counter management
+// ------------------------------------------------------------
+int eepromReadBootCounter() {
+  preferences.begin("companion", true);
+  int count = preferences.getInt("bootCounter", 0);
+  preferences.end();
+  return count;
+}
+
+void eepromWriteBootCounter(int count) {
+  preferences.begin("companion", false);
+  preferences.putInt("bootCounter", count);
+  preferences.end();
+}
+
+// ------------------------------------------------------------
+// Config portal functions
+// ------------------------------------------------------------
+void startConfigPortal() {
+  Serial.println("[WiFi] Entering CONFIG PORTAL mode");
+  
+  // Load Companion config from preferences (for default field values)
+  preferences.begin("companion", true);
+  String savedHost = preferences.getString("companionip", "Companion IP");
+  String savedPort = preferences.getString("companionport", "16622");
+  preferences.end();
+
+  // Prepare WiFiManager with params
+  custom_companionIP   = new WiFiManagerParameter("companionIP", "Companion IP", savedHost.c_str(), 40);
+  custom_companionPort = new WiFiManagerParameter("companionPort", "Satellite Port", savedPort.c_str(), 6);
+
+  wifiManager.addParameter(custom_companionIP);
+  wifiManager.addParameter(custom_companionPort);
+  wifiManager.setSaveParamsCallback(saveParamCallback);
+
+  std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
+  wifiManager.setMenu(menu);
+  wifiManager.setClass("invert");
+  wifiManager.setConfigPortalTimeout(0); // No timeout when we explicitly call config mode
+
+  wifiManager.setAPCallback([](WiFiManager* wm) {
+    Serial.println("[WiFi] Config portal started");
+    configPortalActive = true;
+  });
+
+  // Start AP + portal, blocks until user saves or exits
+  String shortDeviceID = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
+  
+  wifiManager.startConfigPortal(shortDeviceID.c_str(), AP_password);
+  Serial.printf("[WiFi] Config portal started - SSID: %s\n", shortDeviceID.c_str());
+
+  // After returning, update our Companion host/port and persist
+  strncpy(companion_host, custom_companionIP->getValue(), sizeof(companion_host));
+  companion_host[sizeof(companion_host) - 1] = '\0';
+
+  strncpy(companion_port, custom_companionPort->getValue(), sizeof(companion_port));
+  companion_port[sizeof(companion_port) - 1] = '\0';
+
+  // Save to preferences
+  preferences.begin("companion", false);
+  preferences.putString("companionip", String(companion_host));
+  preferences.putString("companionport", String(companion_port));
+  preferences.end();
+
+  Serial.println("[WiFi] Config portal completed");
+  Serial.printf("[WiFi] Companion Host: %s\n", companion_host);
+  Serial.printf("[WiFi] Companion Port: %s\n", companion_port);
+  configPortalActive = false; // Reset flag when portal exits
 }
 
 // ------------------------------------------------------------
@@ -721,16 +810,17 @@ void handleTextModeColors(const String& line) {
 // ------------------------------------------------------------
 void sendAddDevice() {
   String cmd;
+  String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5); // Use last 5 chars like LEDMatrixClock
 
   if (displayMode == DISPLAY_TEXT) {
     // TEXT-ONLY mode: no bitmaps, just TEXT + COLORS
-    cmd = "ADD-DEVICE DEVICEID=" + deviceID +
+    cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
           " PRODUCT_NAME=\"M5 AtomS3 (TEXT)\" "
           "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
           "COLORS=rgb TEXT=true BITMAPS=0";
   } else {
     // BITMAP mode: bitmaps enabled, no TEXT
-    cmd = "ADD-DEVICE DEVICEID=" + deviceID +
+    cmd = "ADD-DEVICE DEVICEID=" + companionDeviceID +
           " PRODUCT_NAME=\"M5 AtomS3 (BITMAP)\" "
           "KEYS_TOTAL=1 KEYS_PER_ROW=1 "
           "COLORS=rgb TEXT=false BITMAPS=72";
@@ -904,6 +994,261 @@ void parseAPI(const String& apiData) {
 }
 
 // ------------------------------------------------------------
+// REST API Handlers for Companion Configuration
+// ------------------------------------------------------------
+void handleGetHost() {
+  Serial.println("[REST] GET /api/host request received");
+  Serial.println("[REST] Current companion_host: '" + String(companion_host) + "'");
+  restServer.send(200, "text/plain", companion_host);
+  Serial.println("[REST] GET /api/host: " + String(companion_host));
+}
+
+void handleGetPort() {
+  Serial.println("[REST] GET /api/port request received");
+  Serial.println("[REST] Current companion_port: '" + String(companion_port) + "'");
+  restServer.send(200, "text/plain", companion_port);
+  Serial.println("[REST] GET /api/port: " + String(companion_port));
+}
+
+void handleGetConfig() {
+  String json = "{\"host\":\"" + String(companion_host) + "\",\"port\":" + String(companion_port) + "}";
+  Serial.println("[REST] GET /api/config request received");
+  Serial.println("[REST] Response JSON: " + json);
+  restServer.send(200, "application/json", json);
+  Serial.println("[REST] GET /api/config: " + json);
+}
+
+void handlePostHost() {
+  String newHost = "";
+  
+  Serial.println("[REST] POST /api/host request received");
+  
+  if (restServer.hasArg("plain")) {
+    String body = restServer.arg("plain");
+    body.trim();
+    Serial.println("[REST] Request body: '" + body + "'");
+    
+    // Check if it's JSON format
+    if (body.startsWith("{") && body.endsWith("}")) {
+      Serial.println("[REST] Parsing JSON format");
+      
+      int hostPos = body.indexOf("\"host\":");
+      if (hostPos >= 0) {
+        int startQuote = body.indexOf("\"", hostPos + 7);
+        int endQuote = body.indexOf("\"", startQuote + 1);
+        if (startQuote >= 0 && endQuote > startQuote) {
+          newHost = body.substring(startQuote + 1, endQuote);
+          Serial.println("[REST] Extracted host from JSON: '" + newHost + "'");
+        }
+      }
+    } else {
+      // Plain text format
+      newHost = body;
+      Serial.println("[REST] Using plain text format: '" + newHost + "'");
+    }
+  }
+  
+  newHost.trim();
+  
+  if (newHost.length() > 0 && newHost.length() < sizeof(companion_host)) {
+    strncpy(companion_host, newHost.c_str(), sizeof(companion_host));
+    companion_host[sizeof(companion_host) - 1] = '\0';
+    
+    // Save to preferences
+    preferences.begin("companion", false);
+    preferences.putString("companionip", String(companion_host));
+    preferences.end();
+    
+    restServer.send(200, "text/plain", "OK");
+    Serial.println("[REST] POST /api/host: Updated to " + String(companion_host));
+    
+    // Reestablish connection
+    if (client.connected()) {
+      client.stop();
+    }
+  } else {
+    restServer.send(400, "text/plain", "Invalid host");
+    Serial.println("[REST] POST /api/host: Invalid host - " + newHost);
+  }
+}
+
+void handlePostPort() {
+  String newPort = "";
+  
+  Serial.println("[REST] POST /api/port request received");
+  
+  if (restServer.hasArg("plain")) {
+    String body = restServer.arg("plain");
+    body.trim();
+    Serial.println("[REST] Request body: '" + body + "'");
+    
+    // Try quoted port first
+    int startQuote = body.indexOf("\"");
+    int endQuote = body.indexOf("\"", startQuote + 1);
+    if (startQuote >= 0 && endQuote > startQuote) {
+      newPort = body.substring(startQuote + 1, endQuote);
+      Serial.println("[REST] Extracted quoted port from JSON: '" + newPort + "'");
+    } else {
+      // Plain text format
+      newPort = body;
+      Serial.println("[REST] Using plain text format: '" + newPort + "'");
+    }
+  }
+  
+  newPort.trim();
+  
+  // Validate port number
+  int portNum = newPort.toInt();
+  if (portNum > 0 && portNum <= 65535) {
+    strncpy(companion_port, newPort.c_str(), sizeof(companion_port));
+    companion_port[sizeof(companion_port) - 1] = '\0';
+    
+    // Save to preferences
+    preferences.begin("companion", false);
+    preferences.putString("companionport", String(companion_port));
+    preferences.end();
+    
+    restServer.send(200, "text/plain", "OK");
+    Serial.println("[REST] POST /api/port: Updated to " + String(companion_port));
+    
+    // Reestablish connection
+    if (client.connected()) {
+      client.stop();
+    }
+  } else {
+    restServer.send(400, "text/plain", "Invalid port number");
+    Serial.println("[REST] POST /api/port: Invalid port - " + newPort);
+  }
+}
+
+void handlePostConfig() {
+  String newHost = "";
+  String newPort = "";
+  
+  Serial.println("[REST] POST /api/config request received");
+  
+  if (restServer.hasArg("plain")) {
+    String body = restServer.arg("plain");
+    body.trim();
+    Serial.println("[REST] Request body: '" + body + "'");
+    
+    if (body.startsWith("{") && body.endsWith("}")) {
+      Serial.println("[REST] Parsing JSON format");
+      
+      // Parse host
+      int hostPos = body.indexOf("\"host\":");
+      if (hostPos >= 0) {
+        int startQuote = body.indexOf("\"", hostPos + 7);
+        int endQuote = body.indexOf("\"", startQuote + 1);
+        if (startQuote >= 0 && endQuote > startQuote) {
+          newHost = body.substring(startQuote + 1, endQuote);
+          Serial.println("[REST] Extracted host from JSON: '" + newHost + "'");
+        }
+      }
+      
+      // Parse port
+      int portPos = body.indexOf("\"port\":");
+      if (portPos >= 0) {
+        // Try quoted port first
+        int startQuote = body.indexOf("\"", portPos + 7);
+        int endQuote = body.indexOf("\"", startQuote + 1);
+        if (startQuote >= 0 && endQuote > startQuote) {
+          newPort = body.substring(startQuote + 1, endQuote);
+          Serial.println("[REST] Extracted quoted port from JSON: '" + newPort + "'");
+        } else {
+          // Try unquoted port number
+          int startNum = portPos + 7;
+          // Skip whitespace and colon
+          while (startNum < body.length() && (body.charAt(startNum) == ' ' || body.charAt(startNum) == ':')) {
+            startNum++;
+          }
+          // Find end by looking for comma or closing brace
+          int endNumComma = body.indexOf(",", startNum);
+          int endNumBrace = body.indexOf("}", startNum);
+          int endNum = -1;
+          
+          // Use the closest delimiter
+          if (endNumComma >= 0 && endNumBrace >= 0) {
+            endNum = (endNumComma < endNumBrace) ? endNumComma : endNumBrace;
+          } else if (endNumComma >= 0) {
+            endNum = endNumComma;
+          } else if (endNumBrace >= 0) {
+            endNum = endNumBrace;
+          }
+          
+          if (endNum >= 0) {
+            newPort = body.substring(startNum, endNum);
+            newPort.trim();
+            Serial.println("[REST] Extracted unquoted port from JSON: '" + newPort + "'");
+          }
+        }
+      }
+    } else {
+      // Plain text format - split by comma
+      int commaPos = body.indexOf(',');
+      if (commaPos >= 0) {
+        newHost = body.substring(0, commaPos);
+        newPort = body.substring(commaPos + 1);
+        newHost.trim();
+        newPort.trim();
+      }
+    }
+  }
+  
+  newHost.trim();
+  newPort.trim();
+  
+  // Validate
+  bool hostValid = (newHost.length() > 0 && newHost.length() < sizeof(companion_host));
+  int portNum = newPort.toInt();
+  bool portValid = (portNum > 0 && portNum <= 65535);
+  
+  if (hostValid && portValid) {
+    strncpy(companion_host, newHost.c_str(), sizeof(companion_host));
+    companion_host[sizeof(companion_host) - 1] = '\0';
+    strncpy(companion_port, newPort.c_str(), sizeof(companion_port));
+    companion_port[sizeof(companion_port) - 1] = '\0';
+    
+    // Save to preferences
+    preferences.begin("companion", false);
+    preferences.putString("companionip", String(companion_host));
+    preferences.putString("companionport", String(companion_port));
+    preferences.end();
+    
+    restServer.send(200, "text/plain", "OK");
+    Serial.println("[REST] POST /api/config: Updated host=" + String(companion_host) + " port=" + String(companion_port));
+    
+    // Reestablish connection
+    if (client.connected()) {
+      client.stop();
+    }
+  } else {
+    restServer.send(400, "text/plain", "Invalid config");
+    Serial.println("[REST] POST /api/config: Invalid config");
+  }
+}
+
+void setupRestServer() {
+  restServer.on("/api/host", HTTP_GET, handleGetHost);
+  restServer.on("/api/port", HTTP_GET, handleGetPort);
+  restServer.on("/api/config", HTTP_GET, handleGetConfig);
+  
+  restServer.on("/api/host", HTTP_POST, handlePostHost);
+  restServer.on("/api/port", HTTP_POST, handlePostPort);
+  restServer.on("/api/config", HTTP_POST, handlePostConfig);
+  
+  restServer.begin();
+  Serial.println("[REST] REST API server started on port 9999");
+  Serial.println("[REST] Available endpoints:");
+  Serial.println("[REST]   GET  /api/host");
+  Serial.println("[REST]   GET  /api/port");
+  Serial.println("[REST]   GET  /api/config");
+  Serial.println("[REST]   POST /api/host");
+  Serial.println("[REST]   POST /api/port");
+  Serial.println("[REST]   POST /api/config");
+}
+
+// ------------------------------------------------------------
 // WiFi + Config Portal
 // ------------------------------------------------------------
 void connectToNetwork() {
@@ -943,17 +1288,54 @@ void connectToNetwork() {
   std::vector<const char*> menu = { "wifi", "param", "info", "sep", "restart", "exit" };
   wifiManager.setMenu(menu);
   wifiManager.setClass("invert");
-  wifiManager.setConfigPortalTimeout(120);
+  wifiManager.setConfigPortalTimeout(180); // 3 minutes auto portal if WiFi fails
 
-  bool res = wifiManager.autoConnect(deviceID.c_str(), AP_password);
+  // Set hostname in WiFiManager to prevent ESP32 default override
+  String wifiHostname = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
+  wifiManager.setHostname(wifiHostname.c_str());
+  Serial.printf("[WiFi] WiFiManager hostname set to: %s\n", wifiHostname.c_str());
+
+  wifiManager.setAPCallback([](WiFiManager* wm) {
+    Serial.println("[WiFi] Config portal started");
+    configPortalActive = true;
+  });
+
+  // Normal autoConnect behaviour (connect to WiFi, or start portal if no WiFi)
+  // WiFi connect animation
+  drawCenterText("Connecting...", WHITE, BLACK);
+  delay(300);
+  drawCenterText("Connecting..", WHITE, BLACK);
+  delay(300);
+  drawCenterText("Connecting.", WHITE, BLACK);
+  delay(300);
+
+  // Use shortened device ID for WiFi portal name (underscore format)
+  String shortDeviceID = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);  // Use last 5 chars like LEDMatrixClock
+  bool res = wifiManager.autoConnect(shortDeviceID.c_str(), AP_password);
+  Serial.printf("[WiFi] AutoConnect - SSID: %s\n", shortDeviceID.c_str());
 
   if (!res) {
-    Serial.println("[WiFi] Failed to connect, showing WiFi ERR");
+    Serial.println("[WiFi] Failed to connect, starting config portal...");
     drawCenterText("WiFi ERR", RED, BLACK);
+    // WiFiManager will automatically start config portal on failure
+    // No need to restart - let WiFiManager handle it
   } else {
     Serial.println("[WiFi] Connected to AP, IP=" + WiFi.localIP().toString());
     drawCenterText("WiFi OK", GREEN, BLACK);
     delay(500);
+    configPortalActive = false; // Reset flag when WiFi connects
+    
+    // Verify and reset hostname after connection to ensure it persists
+    String currentHostname = WiFi.getHostname();
+    String expectedHostname = "m5atom-s3_" + deviceID.substring(deviceID.length() - 5);
+    if (currentHostname != expectedHostname) {
+      Serial.printf("[WiFi] Hostname mismatch, resetting from '%s' to '%s'\n", currentHostname.c_str(), expectedHostname.c_str());
+      WiFi.setHostname(expectedHostname.c_str());
+      delay(100);
+      Serial.printf("[WiFi] Hostname reset to: %s\n", WiFi.getHostname());
+    } else {
+      Serial.printf("[WiFi] Hostname confirmed: %s\n", currentHostname.c_str());
+    }
   }
 
   // Update globals from the latest config values
@@ -976,10 +1358,9 @@ void connectToNetwork() {
   }
 
   // Map rotation degrees -> M5 rotation index (0..3)
-  int rotDeg = rotStr.toInt();
-  if      (rotDeg == 90)  screenRotation = 1;
-  else if (rotDeg == 180) screenRotation = 2;
-  else if (rotDeg == 270) screenRotation = 3;
+  if (rotStr.toInt() == 90)  screenRotation = 1;
+  else if (rotStr.toInt() == 180) screenRotation = 2;
+  else if (rotStr.toInt() == 270) screenRotation = 3;
   else                    screenRotation = 0;
 
   // Only apply rotation in TEXT mode; BITMAP stays at 0
@@ -1015,11 +1396,66 @@ void setup() {
   sprintf(macBuf, "%02X%02X%02X%02X%02X%02X",
           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-  deviceID = "AtomS3_";
+  deviceID = "m5atom-s3_";
   deviceID += macBuf;
   deviceID.toUpperCase();
 
   Serial.println("[ID] deviceID = " + deviceID);
+
+  // Boot counter logic for config portal trigger - check immediately after deviceID creation
+  bootCountCached = eepromReadBootCounter();
+  Serial.printf("[Boot] Boot counter read: %u\n", bootCountCached);
+  
+  if (bootCountCached == 1) {
+    // Boot counter 1 → trigger config portal (user reset during boot animations)
+    Serial.println("[Boot] Boot counter 1 → triggering config portal");
+    eepromWriteBootCounter(0);  // Reset immediately
+    bootCountCached = 0;
+    
+    // Initialize display before showing config portal
+    auto cfg = M5.config();
+    M5.begin(cfg);
+    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setTextSize(1);
+    applyDisplayBrightness();
+    clearScreen(BLACK);
+    
+    // Set flag before display check so it will show the message
+    showConfigPortalMessage = true;
+    Serial.println("[Boot] Setting showConfigPortalMessage flag to true");
+    
+    // Show config portal message if flag is set
+    if (showConfigPortalMessage) {
+      Serial.println("[Display] Showing config portal message - flag is set");
+      
+      // Add small delay to ensure display is fully initialized
+      delay(100);
+      
+      String msg =
+        "CONFIG PORTAL\n\n"
+        "Connect to WiFi:\n" +
+        String("m5atom-s3_") + deviceID.substring(deviceID.length() - 5) +
+        "\nThen go to:\n"
+        "192.168.4.1";
+      Serial.println("[Display] Message: " + msg);
+      drawCenterText(msg, WHITE, BLACK);
+      Serial.println("[Display] drawCenterText called");
+      
+      // Add another delay to ensure the display updates
+      delay(100);
+    } else {
+      Serial.println("[Display] Config portal message flag not set");
+    }
+    
+    startConfigPortal();
+    // startConfigPortal() will handle setup icons
+    return;  // Skip normal boot sequence
+  } else {
+    // Boot counter 0 (or any other value) → normal boot
+    Serial.println("[Boot] Boot counter 0 → normal boot");
+    // Set boot counter to 1 during boot animations so user can reset to trigger portal
+    eepromWriteBootCounter(1);
+  }
 
   // Load preferences
   preferences.begin("companion", false);
@@ -1115,14 +1551,54 @@ void setup() {
   setExternalLedColor(255, 0, 0);  delay(300);
   setExternalLedColor(0, 255, 0);  delay(300);
   setExternalLedColor(0, 0, 255);  delay(300);
-  setExternalLedColor(0, 0, 0);
+  setExternalLedColor(0,0,0);
 
+  // WiFi connect (with icons)
   WiFi.setHostname(deviceID.c_str());
   connectToNetwork();
 
   ArduinoOTA.setHostname(deviceID.c_str());
   ArduinoOTA.setPassword("companion-satellite");
   ArduinoOTA.begin();
+
+  // Start REST API server after WiFi is connected
+  setupRestServer();
+
+  // Initialize mDNS service after WiFi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[mDNS] Starting mDNS service...");
+    
+    // Extract short MAC for hostname (first 5 chars like LEDMatrixClock)
+    String macShort = deviceID.substring(deviceID.length() - 5); // Use last 5 chars like LEDMatrixClock
+    String mDNSHostname = "m5atom-s3_" + macShort;
+    String mDNSInstanceName = "m5atom-s3:" + macShort;
+    
+    if (!MDNS.begin(mDNSHostname.c_str())) {
+      Serial.println("[mDNS] ERROR: mDNS failed to start!");
+    } else {
+      Serial.printf("[mDNS] mDNS started with hostname: %s\n", mDNSHostname.c_str());
+      MDNS.setInstanceName(mDNSInstanceName);
+      
+      // Add companion-satellite service
+      if (MDNS.addService("companion-satellite", "tcp", 9999)) {
+        Serial.println("[mDNS] companion-satellite service registered on port 9999");
+        
+        // Add service text records
+        MDNS.addServiceTxt("companion-satellite", "tcp", "restEnabled", "true");
+        MDNS.addServiceTxt("companion-satellite", "tcp", "deviceId", macShort);
+        MDNS.addServiceTxt("companion-satellite", "tcp", "prefix", "m5atom-s3");
+        MDNS.addServiceTxt("companion-satellite", "tcp", "productName", "M5 AtomS3");
+        MDNS.addServiceTxt("companion-satellite", "tcp", "apiVersion", "4");
+        
+        Serial.println("[mDNS] Service text records added");
+        Serial.printf("[mDNS] Instance name: %s\n", mDNSInstanceName.c_str());
+        Serial.println("[mDNS] Test with: dns-sd -B companion-satellite._tcp");
+        Serial.println("[mDNS] SUCCESS: Full companion-satellite service name working!");
+      } else {
+        Serial.println("[mDNS] ERROR: companion-satellite service registration failed!");
+      }
+    }
+  }
 
   clearScreen(BLACK);
   String waitMsg =
@@ -1133,6 +1609,11 @@ void setup() {
     "\n(" + (displayMode == DISPLAY_TEXT ? "TEXT" : "BITMAP") + " MODE)";
 
   drawCenterText(waitMsg, WHITE, BLACK);
+  
+  // Successful boot completed - set boot counter to 0
+  eepromWriteBootCounter(0);
+  Serial.println("[Boot] Successful boot completed - boot counter reset to 0");
+  
   Serial.println("[System] Setup complete, entering main loop.");
 }
 
@@ -1142,28 +1623,28 @@ void setup() {
 void loop() {
   M5.update();
   ArduinoOTA.handle();
+  restServer.handleClient();
 
-  // 5s long-press -> Config Portal
-  if (M5.BtnA.pressedFor(5000)) {
-    // Force a KEY RELEASE in Companion so it never stays “held”
-    if (client.connected()) {
-      Serial.println("[BTN] Long press, sending KEY RELEASE before config portal");
-      client.println("KEY-PRESS DEVICEID=" + deviceID + " KEY=0 PRESSED=false");
+  // Handle config portal display update
+  if (configPortalActive) {
+    static bool messageShown = false;
+    
+    if (!messageShown) {
+      // Config portal message
+      String msg =
+        "CONFIG PORTAL\n\n"
+        "Connect to WiFi:\n" +
+        String("m5atom-s3_") + deviceID.substring(deviceID.length() - 5) +
+        "\nThen go to:\n"
+        "192.168.4.1";
+
+      drawCenterText(msg, WHITE, BLACK);
+      messageShown = true;
     }
-    delay(50);
-
-    // Config portal message
-    String msg =
-      "CONFIG PORTAL\n\n"
-      "Connect to WiFi:\n" +
-      deviceID +
-      "\nThen go to:\n"
-      "192.168.4.1";
-
-    drawCenterText(msg, WHITE, BLACK);
-
-    while (wifiManager.startConfigPortal(deviceID.c_str(), AP_password)) {}
-    ESP.restart();
+  } else {
+    // Reset flag when portal is not active
+    static bool messageShown = false;
+    messageShown = false;
   }
 
   unsigned long now = millis();
@@ -1198,7 +1679,8 @@ void loop() {
     // Short press -> KEY-PRESS true/false
     if (M5.BtnA.wasPressed()) {
       Serial.println("[BTN] Short press -> KEY=0 PRESSED=true");
-      client.println("KEY-PRESS DEVICEID=" + deviceID + " KEY=0 PRESSED=true");
+      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);
+      client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=true");
 
       // Show yellow border while pressed in TEXT mode
       if (displayMode == DISPLAY_TEXT) {
@@ -1209,7 +1691,8 @@ void loop() {
 
     if (M5.BtnA.wasReleased()) {
       Serial.println("[BTN] Release -> KEY=0 PRESSED=false");
-      client.println("KEY-PRESS DEVICEID=" + deviceID + " KEY=0 PRESSED=false");
+      String companionDeviceID = "m5atom-s3:" + deviceID.substring(deviceID.length() - 5);
+      client.println("KEY-PRESS DEVICEID=" + companionDeviceID + " KEY=0 PRESSED=false");
 
       // Remove border when released in TEXT mode
       if (displayMode == DISPLAY_TEXT) {
